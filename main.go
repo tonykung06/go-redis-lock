@@ -28,7 +28,7 @@ var (
 
 func main() {
   runtime.GOMAXPROCS(4)
-  
+
   fmt.Println("redis go starts")
   flag.Parse()
   pool = newPool(*redisServer)
@@ -84,4 +84,34 @@ func main() {
     }(i)
   }
   wg.Wait()
+
+  conn = pool.Get()
+  defer conn.Close()
+  val, err := redis.String(conn.Do("GET", "testing"))
+  unmarshaledVal := &MyStruct{}
+  err = json.Unmarshal([]byte(val), unmarshaledVal)
+  if err != nil {
+    fmt.Println("json unmarshal error:", err)
+    return
+  }
+  missing := []int{}
+  for i:=1; i<1000; i++ {
+    if !intContains(unmarshaledVal.Values, i) {
+      missing = append(missing, i)
+    }
+  }
+  if len(missing) > 0 {
+    fmt.Println("missing ", missing)
+  } else {
+    fmt.Println("All good, no missing values")
+  }
+}
+
+func intContains(list []int, value int) bool {
+  for _, val := range list {
+    if val == value {
+      return true
+    }
+  }
+  return false
 }
