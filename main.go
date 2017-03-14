@@ -7,7 +7,7 @@ import "sync"
 import "fmt"
 import "runtime"
 import "encoding/json"
-
+import "gopkg.in/redsync.v1"
 
 type MyStruct struct {
   Values []int
@@ -33,8 +33,9 @@ func main() {
   flag.Parse()
   pool = newPool(*redisServer)
   conn := pool.Get()
+  defer conn.Close()
+  r := redsync.New([]redsync.Pool{pool})
   _, err := conn.Do("DEL", "testing")
-  conn.Close()
   if err != nil {
     fmt.Println("Failed cleanup testing beforehand")
     return
@@ -45,6 +46,9 @@ func main() {
     wg.Add(1)
     go func(count int){
       defer wg.Done()
+      m := r.NewMutex("testing_lock")
+      m.Lock()
+      defer m.Unlock()
       conn := pool.Get()
       defer conn.Close()
 
@@ -85,8 +89,6 @@ func main() {
   }
   wg.Wait()
 
-  conn = pool.Get()
-  defer conn.Close()
   val, err := redis.String(conn.Do("GET", "testing"))
   unmarshaledVal := &MyStruct{}
   err = json.Unmarshal([]byte(val), unmarshaledVal)
