@@ -7,7 +7,8 @@ import "sync"
 import "fmt"
 import "runtime"
 import "encoding/json"
-import "gopkg.in/redsync.v1"
+// import "gopkg.in/redsync.v1"
+import "github.com/satori/go.uuid"
 
 type MyStruct struct {
   Values []int
@@ -34,7 +35,7 @@ func main() {
   pool = newPool(*redisServer)
   conn := pool.Get()
   defer conn.Close()
-  r := redsync.New([]redsync.Pool{pool})
+  // r := redsync.New([]redsync.Pool{pool})
   _, err := conn.Do("DEL", "testing")
   if err != nil {
     fmt.Println("Failed cleanup testing beforehand")
@@ -46,11 +47,20 @@ func main() {
     wg.Add(1)
     go func(count int){
       defer wg.Done()
-      m := r.NewMutex("testing_lock")
-      m.Lock()
-      defer m.Unlock()
+      // m := r.NewMutex("testing_lock")
+      // m.Lock()
+      // defer m.Unlock()
       conn := pool.Get()
       defer conn.Close()
+
+      lockIdentifier := acquireLockWithTimeout(pool, "testing", 1000, 1000)
+      if lockIdentifier == "" {
+        fmt.Println("Failed to acquire a lock")
+        return
+      }
+      defer func(lockID string) {
+        releaseLock(pool, "testing", lockID)
+      }(lockIdentifier)
 
       val, err := redis.String(conn.Do("GET", "testing"))
       if err != nil || val == "" {
@@ -87,6 +97,7 @@ func main() {
       }
     }(i)
   }
+  fmt.Println("active connetions: ", pool.ActiveCount())
   wg.Wait()
 
   val, err := redis.String(conn.Do("GET", "testing"))
@@ -114,6 +125,51 @@ func intContains(list []int, value int) bool {
     if val == value {
       return true
     }
+  }
+  return false
+}
+
+func acquireLockWithTimeout(pool *redis.Pool, lockName string, acquireTimeout int, lockTimeout int) string {
+  identifier := uuid.NewV4().String()
+  lockKey := fmt.Sprintf("lock:%v", lockName)
+  lockExpire := lockTimeout / 1000
+  end := time.Now().Unix() + int64(acquireTimeout / 1000)
+  for time.Now().Unix() < end {
+    conn := pool.Get()
+    setnx, err := redis.Int(conn.Do("SETNX", lockKey, identifier))
+    if err == nil && setnx == 1 {
+      conn.Do("EXPIRE", lockKey, lockExpire)
+      conn.Close()
+      return identifier
+    }
+    ttl, err := redis.Int(conn.Do("TTL", lockKey))
+    if err != nil || ttl < 0 {
+      conn.Do("EXPIRE", lockKey, lockExpire)
+    }
+    conn.Close()
+    time.Sleep(1 * time.Millisecond)
+  }
+  return ""
+}
+
+func releaseLock(pool *redis.Pool, lockName string, identifier string) bool {
+  conn := pool.Get()
+  defer conn.Close()
+  lockKey := fmt.Sprintf("lock:%v", lockName)
+  for {
+    conn.Do("WATCH", lockKey)
+    currentLocker, err := redis.String(conn.Do("GET", lockKey))
+
+    if err == nil && identifier == currentLocker {
+      conn.Send("MULTI")
+      conn.Send("DEL", lockKey)
+      r, err := conn.Do("EXEC")
+      if r == nil || err != nil {
+        continue
+      }
+      return true
+    }
+    break
   }
   return false
 }
