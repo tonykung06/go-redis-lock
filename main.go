@@ -27,6 +27,8 @@ var (
   redisServer = flag.String("redisServer", "localhost:6379", "")
 )
 
+var concurrency = 100
+
 func main() {
   runtime.GOMAXPROCS(4)
 
@@ -42,8 +44,9 @@ func main() {
     return
   }
 
+  start := time.Now()
   var wg sync.WaitGroup
-  for i := 1; i <= 1000; i++ {
+  for i := 1; i <= concurrency; i++ {
     wg.Add(1)
     go func(count int){
       defer wg.Done()
@@ -53,7 +56,7 @@ func main() {
       conn := pool.Get()
       defer conn.Close()
 
-      lockIdentifier := acquireLockWithTimeout(pool, "testing", 1000, 1000)
+      lockIdentifier := acquireLockWithTimeout(pool, "testing", 10000, 1000)
       if lockIdentifier == "" {
         fmt.Println("Failed to acquire a lock")
         return
@@ -99,6 +102,7 @@ func main() {
   }
   fmt.Println("active connetions: ", pool.ActiveCount())
   wg.Wait()
+  fmt.Println("it took ", time.Since(start))
 
   val, err := redis.String(conn.Do("GET", "testing"))
   unmarshaledVal := &MyStruct{}
@@ -108,7 +112,7 @@ func main() {
     return
   }
   missing := []int{}
-  for i:=1; i<1000; i++ {
+  for i:=1; i<concurrency; i++ {
     if !intContains(unmarshaledVal.Values, i) {
       missing = append(missing, i)
     }
@@ -129,24 +133,35 @@ func intContains(list []int, value int) bool {
   return false
 }
 
-func acquireLockWithTimeout(pool *redis.Pool, lockName string, acquireTimeout int, lockTimeout int) string {
+func acquireLockWithTimeout(
+  pool *redis.Pool,
+  lockName string,
+  acquireTimeout int,
+  lockTimeout int,
+) string {
   identifier := uuid.NewV4().String()
   lockKey := fmt.Sprintf("lock:%v", lockName)
   lockExpire := lockTimeout / 1000
+
   end := time.Now().Unix() + int64(acquireTimeout / 1000)
+  conn := pool.Get()
+  defer conn.Close()
   for time.Now().Unix() < end {
-    conn := pool.Get()
     setnx, err := redis.Int(conn.Do("SETNX", lockKey, identifier))
     if err == nil && setnx == 1 {
       conn.Do("EXPIRE", lockKey, lockExpire)
-      conn.Close()
       return identifier
     }
+    if err != nil {
+      fmt.Println("SETNX error", err)
+    }
     ttl, err := redis.Int(conn.Do("TTL", lockKey))
+    if err != nil {
+      fmt.Println("TTL error", err)
+    }
     if err != nil || ttl < 0 {
       conn.Do("EXPIRE", lockKey, lockExpire)
     }
-    conn.Close()
     time.Sleep(1 * time.Millisecond)
   }
   return ""
@@ -169,6 +184,7 @@ func releaseLock(pool *redis.Pool, lockName string, identifier string) bool {
       }
       return true
     }
+    conn.Do("UNWATCH")
     break
   }
   return false
